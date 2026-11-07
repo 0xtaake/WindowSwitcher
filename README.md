@@ -1,34 +1,27 @@
-# WindowSwitcher 
-This application was vibecoded with ChatGPT Go.
-A standalone macOS window switcher built with Swift and AppKit. WindowSwitcher displays individual windows in a visual overview and can be controlled with the keyboard or mouse.
+# WindowSwitcher
 
-## Highlights in 0.3.7
+This application was vibecoded with ChatGPT Go. 
+A standalone macOS window switcher built with Swift and AppKit. WindowSwitcher displays individual windows in a visual overview and can be controlled with the keyboard. Mouse-based selection can now be disabled in Settings.
 
-- **Settings window rebuilt:** the previous compressed `NSTabView` layout has been replaced with a more robust segmented navigation containing three settings pages.
-- **Usable settings window size:** the initial size is 800 × 620 pt, and the window can be resized.
-- **Stable window order:** the current Window Server front-to-back (Z) order is no longer used as the visible sorting order.
-- **Existing windows keep their positions:** newly detected windows are appended in deterministic order.
-- **Window ID changes are handled:** when macOS assigns a new `CGWindowID`, WindowSwitcher attempts to match the window to its previous list entry using the app bundle identifier, window title, and last known window position.
-- **Accessibility windows are deduplicated:** each Accessibility (AX) entry can be matched to at most one Window Server entry.
-- **Ambiguous matches are discarded:** uncertain matches are ignored rather than creating additional cards for the same application.
+## Highlights in 0.3.8
 
-## Compiler fix in 0.3.7
-
-- The focused-window lookup no longer uses the conditional cast `as? AXUIElement`.
-- The value returned by `AXUIElementCopyAttributeValue` is first checked using `CFGetTypeID` against `AXUIElementGetTypeID()` and is then bridged to `AXUIElement`.
-- This addresses the Swift compiler error: `conditional downcast to CoreFoundation type AXUIElement will always succeed`.
+- **Optional mouse control:** a setting in **Settings → General → Mouse Control** enables or disables hover selection and click-to-activate for window cards.
+- **Keyboard remains fully available:** disabling mouse control does not affect `Option + Tab`, reverse navigation, arrow-key navigation, commit, or cancel.
+- **No pointer-based monitor placement when disabled:** the switcher uses the main screen instead of choosing a screen based on the mouse pointer.
+- **Settings migration:** preferences written by versions before 0.3.8 are still loaded. The new mouse setting defaults to enabled so existing behavior is preserved until the user changes it.
 
 ## Features
 
 - Window overview using `Option + Tab`
 - Reverse navigation using `Shift + Option + Tab`
 - Keyboard navigation
-- Selection by mouse hover and click
+- Optional mouse hover and click selection
 - Window cards with thumbnails, app icons, and titles
 - Alternative views: app icons and compact list
 - Settings for appearance, window filters, and keyboard shortcuts
 - Filters for minimized and hidden windows
 - Exclusion list based on bundle identifiers
+- Stable session ordering for recognized windows
 - Menu bar integration
 
 ## Requirements
@@ -56,6 +49,24 @@ open build/WindowSwitcher.app
 
 The build script creates a local app bundle, generates `AppIcon.icns`, and applies ad-hoc signing. Administrator privileges are not required.
 
+## Mouse control
+
+Mouse control is enabled by default. To disable it:
+
+1. Open the WindowSwitcher menu bar menu.
+2. Choose **Settings…**.
+3. On the **General** page, find **Mouse Control**.
+4. Turn off **Enable mouse control (hover and click)** and save.
+
+When disabled:
+
+- Moving the pointer over a card does not change the selected window.
+- Clicking a card does not activate it.
+- The switcher does not use the pointer position to choose which display should show the overlay; it uses the main display.
+- Keyboard shortcuts and keyboard navigation continue to work normally.
+
+Turn the option back on to restore hover and click selection.
+
 ## macOS permissions
 
 - **Accessibility:** required to activate a specific window and read window attributes.
@@ -77,6 +88,7 @@ Distinct document windows belonging to the same application remain separate entr
 - The public macOS APIs used by the app do not provide a simple, reliable Space ID for every window. Detection of windows on other Spaces is therefore best effort.
 - Some applications provide incomplete Accessibility metadata. In those cases, a conservative title/geometry match is used; ambiguous windows may be omitted.
 - If an application has multiple real windows with the same title and exactly the same position and size, and does not provide a window ID through Accessibility, it may not be technically possible to distinguish them with complete reliability.
+- Mouse control currently covers card hover selection and click-to-activate. It does not change the keyboard monitor or other macOS pointer behavior outside the switcher.
 
 ## Documentation
 
