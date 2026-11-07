@@ -53,6 +53,20 @@ struct AppSettings: Codable, Equatable {
     var includeMinimizedWindows = true
     var includeHiddenApplications = true
     var includeWindowsOnOtherSpaces = true
+    /// Persisted under the legacy `excludeCurrentWindowFromSwitcher` key for
+    /// backwards compatibility. The behavior now excludes the entire active
+    /// application, identified by process ID and bundle identifier. This is
+    /// more reliable for apps such as Chromium-based browsers whose focused
+    /// AX window number may be unavailable or inconsistent.
+    var excludeCurrentWindowFromSwitcher = false
+
+    /// Semantic name used by the current UI and switcher logic. The stored
+    /// property above is intentionally retained so existing preferences load.
+    var excludeCurrentApplicationFromSwitcher: Bool {
+        get { excludeCurrentWindowFromSwitcher }
+        set { excludeCurrentWindowFromSwitcher = newValue }
+    }
+
     var excludedBundleIdentifiers: [String] = []
 
     var visualStyle: SwitcherVisualStyle = .thumbnails
@@ -88,6 +102,7 @@ struct AppSettings: Codable, Equatable {
         case includeMinimizedWindows
         case includeHiddenApplications
         case includeWindowsOnOtherSpaces
+        case excludeCurrentWindowFromSwitcher
         case excludedBundleIdentifiers
         case visualStyle
         case columns
@@ -106,6 +121,7 @@ struct AppSettings: Codable, Equatable {
         includeMinimizedWindows = try container.decodeIfPresent(Bool.self, forKey: .includeMinimizedWindows) ?? true
         includeHiddenApplications = try container.decodeIfPresent(Bool.self, forKey: .includeHiddenApplications) ?? true
         includeWindowsOnOtherSpaces = try container.decodeIfPresent(Bool.self, forKey: .includeWindowsOnOtherSpaces) ?? true
+        excludeCurrentWindowFromSwitcher = try container.decodeIfPresent(Bool.self, forKey: .excludeCurrentWindowFromSwitcher) ?? false
         excludedBundleIdentifiers = try container.decodeIfPresent([String].self, forKey: .excludedBundleIdentifiers) ?? []
         visualStyle = try container.decodeIfPresent(SwitcherVisualStyle.self, forKey: .visualStyle) ?? .thumbnails
         columns = try container.decodeIfPresent(Int.self, forKey: .columns) ?? 3

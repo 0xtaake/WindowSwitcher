@@ -3,15 +3,52 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="WindowSwitcher"
-APP_VERSION="0.4.0"
-BUILD_NUMBER="15"
+APP_VERSION="0.4.2"
+BUILD_NUMBER="18"
 APP_DIR="$ROOT_DIR/build/$APP_NAME.app"
 EXECUTABLE="$ROOT_DIR/.build/release/$APP_NAME"
 ICONSET_DIR="$ROOT_DIR/.build/AppIcon.iconset"
 MASTER_ICON="$ROOT_DIR/.build/AppIcon-1024.png"
 
 cd "$ROOT_DIR"
-swift build -c release
+
+# Compile with the active Xcode/Command Line Tools compiler directly instead
+# of SwiftPM's swiftbuild backend. SwiftPM 6.4/CLT-only installations can add
+# invalid Xcode-relative search paths under CommandLineTools/Developer, which
+# results in harmless but noisy ld warnings. Direct swiftc uses the SDK's real
+# framework paths and avoids those synthetic linker search paths.
+if ! command -v xcrun >/dev/null 2>&1; then
+  echo "Fehler: xcrun wurde nicht gefunden. Bitte Xcode Command Line Tools installieren." >&2
+  exit 1
+fi
+
+SWIFTC="$(xcrun --find swiftc)"
+SWIFT_INTERPRETER="$(xcrun --find swift)"
+SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+ARCH="${WINDOWSWITCHER_ARCH:-$(uname -m)}"
+case "$ARCH" in
+  arm64|x86_64) ;;
+  *)
+    echo "Nicht unterstützte Architektur: $ARCH (erwartet arm64 oder x86_64)." >&2
+    exit 1
+    ;;
+esac
+TARGET_TRIPLE="$ARCH-apple-macos13.0"
+SWIFT_SOURCES=("$ROOT_DIR"/Sources/WindowSwitcher/*.swift)
+
+mkdir -p "$ROOT_DIR/.build/release" "$ROOT_DIR/.build/ModuleCache"
+"$SWIFTC" \
+  -O \
+  -swift-version 5 \
+  -target "$TARGET_TRIPLE" \
+  -sdk "$SDK_PATH" \
+  -module-cache-path "$ROOT_DIR/.build/ModuleCache" \
+  -framework AppKit \
+  -framework ApplicationServices \
+  -framework CoreGraphics \
+  -framework ScreenCaptureKit \
+  "${SWIFT_SOURCES[@]}" \
+  -o "$EXECUTABLE"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Build fehlgeschlagen: ausführbare Datei nicht gefunden: $EXECUTABLE" >&2
@@ -26,7 +63,7 @@ cp "$EXECUTABLE" "$APP_DIR/Contents/MacOS/$APP_NAME"
 # All work happens in the user's project directory; no admin privileges are needed.
 rm -rf "$ICONSET_DIR"
 mkdir -p "$ICONSET_DIR"
-swift "$ROOT_DIR/scripts/generate-app-icon.swift" "$MASTER_ICON"
+"$SWIFT_INTERPRETER" "$ROOT_DIR/scripts/generate-app-icon.swift" "$MASTER_ICON"
 
 make_icon_size() {
   local filename="$1"

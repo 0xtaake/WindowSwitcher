@@ -102,7 +102,46 @@ final class SwitcherCoordinator {
 
     func begin(reverse: Bool) {
         previewHideWorkItem?.cancel()
-        windows = orderedSnapshot()
+
+        // Capture the frontmost application before showing our overlay. Do not
+        // rely on AXFocusedWindow/AXWindowNumber for this preference: some apps
+        // (notably Chromium-based browsers such as Brave) do not expose a stable
+        // focused-window number. PID plus bundle ID identifies the application
+        // independently of its Accessibility implementation.
+        let settings = AppSettingsStore.shared.settings
+        let activeApplication = NSWorkspace.shared.frontmostApplication
+        let activeIdentity = catalog.frontmostWindowIdentity()
+        let orderedWindows = orderedSnapshot()
+
+        let activeApplicationWindows: [WindowInfo]
+        if let activeApplication {
+            activeApplicationWindows = orderedWindows.filter {
+                belongsToApplication($0, application: activeApplication)
+            }
+        } else {
+            activeApplicationWindows = []
+        }
+
+        let didExcludeActiveApplication = settings.excludeCurrentApplicationFromSwitcher
+            && !activeApplicationWindows.isEmpty
+
+        if didExcludeActiveApplication, let activeApplication {
+            windows = orderedWindows.filter {
+                !belongsToApplication($0, application: activeApplication)
+            }
+            NSLog(
+                "WindowSwitcher: Aktive Anwendung ausgeblendet: \(activeApplication.localizedName ?? "Unbekannt") (PID \(activeApplication.processIdentifier), \(activeApplicationWindows.count) Fenster)."
+            )
+        } else {
+            windows = orderedWindows
+            if settings.excludeCurrentApplicationFromSwitcher {
+                let appName = activeApplication?.localizedName ?? "unbekannt"
+                NSLog(
+                    "WindowSwitcher: Aktive Anwendung \(appName) konnte in der Fensterliste nicht gefunden werden; Liste bleibt unverändert."
+                )
+            }
+        }
+
         guard !windows.isEmpty else {
             NSLog("WindowSwitcher: Keine geeigneten Fenster gefunden.")
             return
@@ -112,11 +151,15 @@ final class SwitcherCoordinator {
         thumbnailTargetIDs = []
         isVisible = true
 
-        // The currently focused window is displayed at index 0. The first
-        // Option+Tab press selects the previous MRU window at index 1.
-        if let activeIdentity = catalog.frontmostWindowIdentity(),
-           let activeIndex = windows.firstIndex(where: { $0.identity == activeIdentity }),
-           windows.count > 1 {
+        if didExcludeActiveApplication {
+            // All windows belonging to the active application are absent. The
+            // first remaining MRU entry is the next eligible application/window.
+            selectedIndex = reverse ? windows.count - 1 : 0
+        } else if let activeIdentity,
+                  let activeIndex = windows.firstIndex(where: { $0.identity == activeIdentity }),
+                  windows.count > 1 {
+            // Default behavior: keep the active window visible at index zero;
+            // the first Option+Tab press selects the next MRU entry.
             selectedIndex = (activeIndex + (reverse ? -1 : 1) + windows.count) % windows.count
         } else {
             selectedIndex = reverse ? max(windows.count - 1, 0) : 0
@@ -365,6 +408,16 @@ final class SwitcherCoordinator {
 
         return mruWindowEntries.compactMap { currentWindowsByIdentity[$0.identity] }
             .filter { shouldDisplay($0, settings: visibleSettings) }
+    }
+
+    /// Match a Window Server/Accessibility window to the frontmost app without
+    /// requiring AXWindowNumber. PID is authoritative for the main process;
+    /// bundle ID also covers additional regular processes belonging to the app.
+    private func belongsToApplication(_ window: WindowInfo, application: NSRunningApplication) -> Bool {
+        if window.ownerPID == application.processIdentifier { return true }
+        guard let activeBundleIdentifier = application.bundleIdentifier,
+              !activeBundleIdentifier.isEmpty else { return false }
+        return window.bundleIdentifier == activeBundleIdentifier
     }
 
     private func shouldDisplay(_ window: WindowInfo, settings: AppSettings) -> Bool {

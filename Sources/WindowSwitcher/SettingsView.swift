@@ -30,6 +30,11 @@ final class SettingsViewController: NSViewController {
     private let includeMinimizedCheckbox = NSButton(checkboxWithTitle: "Minimierte Fenster einschließen", target: nil, action: nil)
     private let includeHiddenCheckbox = NSButton(checkboxWithTitle: "Fenster ausgeblendeter Apps einschließen", target: nil, action: nil)
     private let includeOtherSpacesCheckbox = NSButton(checkboxWithTitle: "Fenster anderer Spaces einschließen", target: nil, action: nil)
+    private let excludeCurrentApplicationCheckbox = NSButton(
+        checkboxWithTitle: "Aktive Anwendung ausblenden",
+        target: nil,
+        action: nil
+    )
     private let excludedIDsField = NSTextField(string: "")
 
     private let shortcutKeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -148,6 +153,7 @@ final class SettingsViewController: NSViewController {
         includeMinimizedCheckbox.state = draft.includeMinimizedWindows ? .on : .off
         includeHiddenCheckbox.state = draft.includeHiddenApplications ? .on : .off
         includeOtherSpacesCheckbox.state = draft.includeWindowsOnOtherSpaces ? .on : .off
+        excludeCurrentApplicationCheckbox.state = draft.excludeCurrentApplicationFromSwitcher ? .on : .off
         excludedIDsField.stringValue = draft.excludedBundleIdentifiers.joined(separator: ", ")
         excludedIDsField.placeholderString = "com.apple.finder, com.apple.Terminal"
         excludedIDsField.widthAnchor.constraint(equalToConstant: 690).isActive = true
@@ -187,11 +193,19 @@ final class SettingsViewController: NSViewController {
 
     private func makeWindowsView() -> NSView {
         let exclusionsHint = wrappingLabel("Bundle-Identifier der auszuschließenden Apps, durch Kommas getrennt. Die Änderung wird beim Speichern übernommen.", width: 690)
+        let activeApplicationHint = wrappingLabel(
+            "Alle Fenster der Anwendung, die beim Öffnen von Option + Tab im Vordergrund ist, werden ausgeblendet. Die Erkennung nutzt Prozess-ID und Bundle-ID statt AXWindowNumber – wichtig für Brave und andere Chromium-Browser.",
+            width: 690
+        )
         return makePage([
             sectionLabel("Welche Fenster anzeigen?"),
             includeMinimizedCheckbox,
             includeHiddenCheckbox,
             includeOtherSpacesCheckbox,
+            NSBox.separator(),
+            sectionLabel("Aktuelle Anwendung"),
+            excludeCurrentApplicationCheckbox,
+            activeApplicationHint,
             NSBox.separator(),
             sectionLabel("Ausnahmen"),
             exclusionsHint,
@@ -307,6 +321,7 @@ final class SettingsViewController: NSViewController {
         result.includeMinimizedWindows = includeMinimizedCheckbox.state == .on
         result.includeHiddenApplications = includeHiddenCheckbox.state == .on
         result.includeWindowsOnOtherSpaces = includeOtherSpacesCheckbox.state == .on
+        result.excludeCurrentApplicationFromSwitcher = excludeCurrentApplicationCheckbox.state == .on
         result.excludedBundleIdentifiers = excludedIDsField.stringValue
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
