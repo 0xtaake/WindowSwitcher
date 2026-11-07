@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="WindowSwitcher"
-APP_VERSION="0.3.9"
-BUILD_NUMBER="14"
+APP_VERSION="0.4.0"
+BUILD_NUMBER="15"
 APP_DIR="$ROOT_DIR/build/$APP_NAME.app"
 EXECUTABLE="$ROOT_DIR/.build/release/$APP_NAME"
 ICONSET_DIR="$ROOT_DIR/.build/AppIcon.iconset"

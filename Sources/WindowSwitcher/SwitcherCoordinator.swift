@@ -5,31 +5,42 @@ final class SwitcherCoordinator {
     private let catalog = WindowCatalog()
     private let panel = SwitcherPanelController()
     private let thumbnailProvider = WindowThumbnailProvider()
+    private let focusObserver = WindowFocusObserver()
     private var windows: [WindowInfo] = []
     private var thumbnails: [CGWindowID: NSImage] = [:]
     private var thumbnailTargetIDs: [CGWindowID] = []
-    // Windows are ordered by first observation (newest first), not by current
-    // activation/Z-order. A background discovery timer records newly opened
-    // windows before the user invokes the switcher.
-    private struct StableWindowGroup: Equatable {
+
+    private struct WindowGroup: Equatable {
         let bundleIdentifier: String
         let title: String
     }
 
-    private struct StableWindowEntry {
+    private struct MRUWindowEntry {
         var identity: WindowIdentity
-        let group: StableWindowGroup
+        let group: WindowGroup
         var lastBounds: CGRect
         var lastSeenAt: Date
     }
 
-    /// Entries are kept newest-first. Missing entries remain as short-lived
-    /// tombstones so brief Window Server/AX gaps do not reset their age/order.
-    private var stableWindowEntries: [StableWindowEntry] = []
+    /// Most-recently-used order: index 0 is the last focused window.
+    /// Activating a window moves its entry to the front; opening a background
+    /// window alone does not change the activation history.
+    private var mruWindowEntries: [MRUWindowEntry] = []
+
     private var discoveryTimer: Timer?
+    private var focusTrackingTimer: Timer?
+    private var applicationActivationObserver: NSObjectProtocol?
     private let discoveryInterval: TimeInterval = 0.75
+    private let focusTrackingInterval: TimeInterval = 0.35
     private let identityRebindGrace: TimeInterval = 5.0
     private let staleEntryLifetime: TimeInterval = 60 * 60 * 24 * 30
+    private var lastUnknownFocusRefreshAt = Date.distantPast
+
+    /// After committing a switch, ignore the old frontmost-window value briefly
+    /// while macOS completes activation of the selected target.
+    private var pendingActivationIdentity: WindowIdentity?
+    private var pendingActivationDeadline: Date?
+
     private var selectedIndex = 0
     private var isVisible = false
     private var previewHideWorkItem: DispatchWorkItem?
@@ -37,26 +48,56 @@ final class SwitcherCoordinator {
     init() {
         panel.onHoverSelection = { [weak self] index in self?.select(index: index) }
         panel.onClickSelection = { [weak self] index in self?.commit(at: index) }
+        focusObserver.onFocusedWindowChanged = { [weak self] pid in
+            self?.trackFrontmostWindow(for: pid)
+        }
     }
 
-    /// Start observing the window list before the first switcher invocation.
-    /// This lets WindowSwitcher detect newly opened windows instead of trying
-    /// to infer their creation order from the changing front-to-back Z-order.
+    /// Start both window discovery and focused-window tracking. A short focus
+    /// poll captures switches between windows of the same app; the slower
+    /// discovery poll detects windows that have just been created.
     func startWindowDiscovery() {
         guard discoveryTimer == nil else { return }
-        _ = orderedSnapshot() // Seed windows that were already open.
+        _ = orderedSnapshot() // Seed the MRU list with the current frontmost window.
 
-        let timer = Timer(timeInterval: discoveryInterval, repeats: true) { [weak self] _ in
+        let discovery = Timer(timeInterval: discoveryInterval, repeats: true) { [weak self] _ in
             guard let self, !self.isVisible else { return }
             _ = self.orderedSnapshot()
         }
-        discoveryTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        discoveryTimer = discovery
+        RunLoop.main.add(discovery, forMode: .common)
+
+        let focus = Timer(timeInterval: focusTrackingInterval, repeats: true) { [weak self] _ in
+            self?.trackFrontmostWindow()
+        }
+        focusTrackingTimer = focus
+        RunLoop.main.add(focus, forMode: .common)
+
+        applicationActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // NSWorkspace posts the app-activation notification as part of the
+            // activation sequence. Defer one main-loop turn so AX reports the
+            // newly focused window rather than the previous app's window.
+            DispatchQueue.main.async {
+                guard let self, !self.isVisible else { return }
+                self.trackFrontmostWindow(forceRefreshIfUnknown: true)
+            }
+        }
     }
 
     func stopWindowDiscovery() {
         discoveryTimer?.invalidate()
         discoveryTimer = nil
+        focusTrackingTimer?.invalidate()
+        focusTrackingTimer = nil
+        focusObserver.stop()
+        if let applicationActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(applicationActivationObserver)
+            self.applicationActivationObserver = nil
+        }
     }
 
     func begin(reverse: Bool) {
@@ -70,6 +111,9 @@ final class SwitcherCoordinator {
         thumbnails = [:]
         thumbnailTargetIDs = []
         isVisible = true
+
+        // The currently focused window is displayed at index 0. The first
+        // Option+Tab press selects the previous MRU window at index 1.
         if let activeIdentity = catalog.frontmostWindowIdentity(),
            let activeIndex = windows.firstIndex(where: { $0.identity == activeIdentity }),
            windows.count > 1 {
@@ -130,6 +174,11 @@ final class SwitcherCoordinator {
         isVisible = false
         panel.hide()
         if let selected {
+            // Promote immediately so the next invocation already reflects the
+            // target window, even before macOS posts its activation notification.
+            promoteWindow(selected.identity)
+            pendingActivationIdentity = selected.identity
+            pendingActivationDeadline = Date().addingTimeInterval(1.0)
             catalog.activate(selected)
         }
         clearTransientState()
@@ -143,51 +192,121 @@ final class SwitcherCoordinator {
         clearTransientState()
     }
 
+    /// Updates the MRU order from the actual focused window, not from the
+    /// current Window Server stacking order. AXObserver callbacks detect
+    /// same-app window switches; the timer is a fallback for unsupported apps.
+    private func trackFrontmostWindow(
+        for observedPID: pid_t? = nil,
+        forceRefreshIfUnknown: Bool = false
+    ) {
+        guard !isVisible,
+              let frontmostApplication = NSWorkspace.shared.frontmostApplication else { return }
+
+        let frontmostPID = frontmostApplication.processIdentifier
+        // An inactive app can occasionally emit a delayed AX notification. It
+        // must not be promoted while another app owns the foreground focus.
+        if let observedPID, observedPID != frontmostPID { return }
+        guard let identity = catalog.focusedWindowIdentity(for: frontmostPID) else { return }
+        let now = Date()
+
+        if let pending = pendingActivationIdentity,
+           let deadline = pendingActivationDeadline,
+           now < deadline {
+            if identity == pending {
+                pendingActivationIdentity = nil
+                pendingActivationDeadline = nil
+            } else {
+                // Avoid moving the previously active window back to the front
+                // while the newly selected target is still being raised.
+                return
+            }
+        } else {
+            pendingActivationIdentity = nil
+            pendingActivationDeadline = nil
+        }
+
+        if promoteWindow(identity) { return }
+
+        // A newly opened or newly revealed window may not be in the last
+        // snapshot yet. Refresh at a bounded rate rather than repeatedly
+        // querying every application's Accessibility tree on each focus tick.
+        let shouldRefresh = forceRefreshIfUnknown
+            || now.timeIntervalSince(lastUnknownFocusRefreshAt) >= discoveryInterval
+        if shouldRefresh {
+            lastUnknownFocusRefreshAt = now
+            _ = orderedSnapshot()
+        }
+    }
+
+    @discardableResult
+    private func promoteWindow(_ identity: WindowIdentity) -> Bool {
+        guard let index = mruWindowEntries.firstIndex(where: { $0.identity == identity }) else {
+            return false
+        }
+        if index > 0 {
+            let entry = mruWindowEntries.remove(at: index)
+            mruWindowEntries.insert(entry, at: 0)
+        }
+        mruWindowEntries[0].lastSeenAt = Date()
+        return true
+    }
+
     private func orderedSnapshot() -> [WindowInfo] {
         let visibleSettings = AppSettingsStore.shared.settings
         var discoverySettings = visibleSettings
-        // Keep tracking all regular-app windows even when the user currently
-        // filters some categories out of the switcher. This avoids treating a
-        // previously hidden/minimized/excluded window as newly opened later.
+        // Track every regular-app window even when the user currently filters
+        // some categories out. It can still participate in MRU history.
         discoverySettings.includeMinimizedWindows = true
         discoverySettings.includeHiddenApplications = true
         discoverySettings.includeWindowsOnOtherSpaces = true
         discoverySettings.excludedBundleIdentifiers = []
+
         let snapshot = catalog.snapshot(settings: discoverySettings)
+        focusObserver.sync(with: NSWorkspace.shared.runningApplications)
         guard !snapshot.isEmpty else {
-            // Keep the tracked ordering through transient empty snapshots.
+            // Do not discard MRU state during a transient empty Window Server snapshot.
             return []
         }
 
-        var uniqueByIdentity: [WindowIdentity: WindowInfo] = [:]
-        for window in snapshot {
-            uniqueByIdentity[window.identity] = window
+        // Preserve the order returned by Core Graphics while removing duplicate
+        // identities. Do not convert to Dictionary.values: that has no ordering.
+        var snapshotWindows: [WindowInfo] = []
+        var seenIdentities = Set<WindowIdentity>()
+        for window in snapshot where seenIdentities.insert(window.identity).inserted {
+            snapshotWindows.append(window)
         }
-        let now = Date()
-        var unmatched = Array(uniqueByIdentity.values)
 
-        // First run: macOS does not expose per-window creation timestamps.
-        // Use process launch dates where available, then a stable fallback for
-        // multiple windows belonging to the same already-running application.
-        if stableWindowEntries.isEmpty {
-            let baseline = unmatched.sorted(by: initialWindowSort)
-            stableWindowEntries = baseline.map { window in
-                return StableWindowEntry(
+        let now = Date()
+        let activeIdentity = catalog.frontmostWindowIdentity()
+
+        if mruWindowEntries.isEmpty {
+            // For windows already open at app launch, the Window Server list is
+            // the best available initial front-to-back approximation. Explicitly
+            // move the focused window to the first position when it is known.
+            if let activeIdentity,
+               let activeIndex = snapshotWindows.firstIndex(where: { $0.identity == activeIdentity }) {
+                let active = snapshotWindows.remove(at: activeIndex)
+                snapshotWindows.insert(active, at: 0)
+            }
+
+            mruWindowEntries = snapshotWindows.map { window in
+                MRUWindowEntry(
                     identity: window.identity,
-                    group: stableGroup(for: window),
+                    group: windowGroup(for: window),
                     lastBounds: window.bounds,
                     lastSeenAt: now
                 )
             }
-            return baseline.filter { shouldDisplay($0, settings: visibleSettings) }
+            return snapshotWindows.filter { shouldDisplay($0, settings: visibleSettings) }
         }
 
-        let previousEntries = stableWindowEntries
+        let previousEntries = mruWindowEntries
         var updatedEntries = previousEntries
+        var unmatched = snapshotWindows
         var matchedEntryIndices = Set<Int>()
-        var existingWindowsBySlot: [Int: WindowInfo] = [:]
+        var currentWindowsByIdentity: [WindowIdentity: WindowInfo] = [:]
 
-        // 1. Match exact identities. Existing entries never move when activated.
+        // 1. Preserve exact window identities in their existing MRU slots.
         for index in previousEntries.indices {
             guard let matchIndex = unmatched.firstIndex(where: {
                 $0.identity == previousEntries[index].identity
@@ -197,17 +316,16 @@ final class SwitcherCoordinator {
             updatedEntries[index].lastBounds = window.bounds
             updatedEntries[index].lastSeenAt = now
             matchedEntryIndices.insert(index)
-            existingWindowsBySlot[index] = window
+            currentWindowsByIdentity[window.identity] = window
         }
 
-        // 2. If macOS recreated a window ID, only reuse a recently seen slot.
-        // Limiting this grace period prevents a newly opened same-title window
-        // from inheriting the age of an older, already closed window.
+        // 2. If macOS has recreated a CGWindowID, rebind it to a recently seen
+        // entry using app, title, and nearest previous geometry.
         for index in previousEntries.indices where !matchedEntryIndices.contains(index) {
             let oldEntry = previousEntries[index]
             guard now.timeIntervalSince(oldEntry.lastSeenAt) <= identityRebindGrace else { continue }
             let candidates = unmatched.indices.filter {
-                stableGroup(for: unmatched[$0]) == oldEntry.group
+                windowGroup(for: unmatched[$0]) == oldEntry.group
             }
             guard let matchIndex = candidates.min(by: {
                 frameDistance(unmatched[$0].bounds, oldEntry.lastBounds)
@@ -219,36 +337,34 @@ final class SwitcherCoordinator {
             updatedEntries[index].lastBounds = window.bounds
             updatedEntries[index].lastSeenAt = now
             matchedEntryIndices.insert(index)
-            existingWindowsBySlot[index] = window
+            currentWindowsByIdentity[window.identity] = window
         }
 
-        // 3. Every newly discovered window is inserted at the front. Sorting
-        // only breaks ties for windows first observed in the same polling pass;
-        // it never uses current activation order as the persistent list order.
-        let newWindows = unmatched.sorted(by: stableNewWindowSort)
-        let newEntries = newWindows.map { window in
-            StableWindowEntry(
+        // 3. Newly discovered windows are appended to the MRU history. If the
+        // new window is currently focused, the focus promotion below moves it
+        // immediately to position 0. Background windows do not become MRU just
+        // because they appeared in a snapshot.
+        let newEntries = unmatched.map { window in
+            currentWindowsByIdentity[window.identity] = window
+            return MRUWindowEntry(
                 identity: window.identity,
-                group: stableGroup(for: window),
+                group: windowGroup(for: window),
                 lastBounds: window.bounds,
                 lastSeenAt: now
             )
         }
 
-        // Prune long-expired tombstones, but keep entries hidden by a transient
-        // snapshot gap long enough to preserve their original slot.
-        let retainedOldEntries = updatedEntries.filter {
+        let retainedEntries = updatedEntries.filter {
             now.timeIntervalSince($0.lastSeenAt) <= staleEntryLifetime
         }
-        stableWindowEntries = newEntries + retainedOldEntries
+        mruWindowEntries = retainedEntries + newEntries
 
-        let stillPresentOldWindows = previousEntries.indices.compactMap { index -> WindowInfo? in
-            guard matchedEntryIndices.contains(index) else { return nil }
-            return existingWindowsBySlot[index]
+        if let activeIdentity {
+            _ = promoteWindow(activeIdentity)
         }
-        return (newWindows + stillPresentOldWindows).filter {
-            shouldDisplay($0, settings: visibleSettings)
-        }
+
+        return mruWindowEntries.compactMap { currentWindowsByIdentity[$0.identity] }
+            .filter { shouldDisplay($0, settings: visibleSettings) }
     }
 
     private func shouldDisplay(_ window: WindowInfo, settings: AppSettings) -> Bool {
@@ -262,23 +378,13 @@ final class SwitcherCoordinator {
         return true
     }
 
-    /// On the first snapshot, use application launch time as the best public
-    /// approximation for app ordering. The order of multiple windows from the
-    /// same pre-existing app cannot be recovered exactly from public macOS APIs.
-    private func initialWindowSort(_ lhs: WindowInfo, _ rhs: WindowInfo) -> Bool {
-        let lhsDate = lhs.applicationLaunchDate ?? .distantPast
-        let rhsDate = rhs.applicationLaunchDate ?? .distantPast
-        if lhsDate != rhsDate { return lhsDate > rhsDate }
-        return stableNewWindowSort(lhs, rhs)
-    }
-
-    private func stableGroup(for window: WindowInfo) -> StableWindowGroup {
+    private func windowGroup(for window: WindowInfo) -> WindowGroup {
         let bundle = window.bundleIdentifier ?? "pid:\(window.ownerPID)"
         let title = window.title
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .lowercased()
-        return StableWindowGroup(bundleIdentifier: bundle, title: title)
+        return WindowGroup(bundleIdentifier: bundle, title: title)
     }
 
     private func frameDistance(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
@@ -286,23 +392,6 @@ final class SwitcherCoordinator {
             + abs(lhs.origin.y - rhs.origin.y)
             + abs(lhs.size.width - rhs.size.width)
             + abs(lhs.size.height - rhs.size.height)
-    }
-
-    private func stableNewWindowSort(_ lhs: WindowInfo, _ rhs: WindowInfo) -> Bool {
-        let lhsGroup = stableGroup(for: lhs)
-        let rhsGroup = stableGroup(for: rhs)
-        if lhsGroup.bundleIdentifier != rhsGroup.bundleIdentifier {
-            return lhsGroup.bundleIdentifier.localizedStandardCompare(rhsGroup.bundleIdentifier) == .orderedAscending
-        }
-        if lhsGroup.title != rhsGroup.title {
-            return lhsGroup.title.localizedStandardCompare(rhsGroup.title) == .orderedAscending
-        }
-        if lhs.bounds.origin.y != rhs.bounds.origin.y { return lhs.bounds.origin.y < rhs.bounds.origin.y }
-        if lhs.bounds.origin.x != rhs.bounds.origin.x { return lhs.bounds.origin.x < rhs.bounds.origin.x }
-        if lhs.bounds.size.width != rhs.bounds.size.width { return lhs.bounds.size.width < rhs.bounds.size.width }
-        if lhs.bounds.size.height != rhs.bounds.size.height { return lhs.bounds.size.height < rhs.bounds.size.height }
-        if lhs.ownerPID != rhs.ownerPID { return lhs.ownerPID < rhs.ownerPID }
-        return lhs.id < rhs.id
     }
 
     private func loadThumbnails() {

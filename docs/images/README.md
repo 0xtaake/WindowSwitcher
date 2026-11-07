@@ -8,4 +8,5 @@ These images are illustrative, AI-assisted design mockups, not screenshots captu
 - `03-settings-general.png` — general settings concept
 - `04-settings-windows.png` — window filtering concept
 - `05-settings-keyboard.png` — keyboard settings concept
-- `06-opened-order-v0.3.9.png` — newest-opened-first ordering concept for v0.3.9
+- `06-opened-order-v0.3.9.png` — historical newest-opened-first concept for v0.3.9 (superseded by MRU in v0.4.0)
+- `07-mru-order-v0.4.0.png` — most-recently-used ordering concept for v0.4.0

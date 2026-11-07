@@ -2,6 +2,34 @@
 
 All notable changes to WindowSwitcher are documented in this file.
 
+## [0.4.0] - 2026-11-07
+
+### Added
+
+- Added most-recently-used (MRU) ordering for individual windows. The currently focused window is shown first, followed by previously focused windows in descending recency.
+- Added per-application `AXObserver` registrations for `kAXFocusedWindowChangedNotification`, allowing focus changes between windows of the same app to update MRU order.
+- Added `NSWorkspace.didActivateApplicationNotification` handling for application-level activation changes.
+- Added a 350 ms foreground-window polling fallback for applications that do not reliably emit Accessibility focus notifications.
+- Added immediate MRU promotion when the user commits a switch, so the next switcher invocation reflects the selected window without waiting for a later notification.
+- Added a new GitHub mockup illustrating MRU ordering.
+
+### Changed
+
+- Replaced the 0.3.9 newest-opened-first/discovery ordering with actual most-recently-used ordering.
+- Newly discovered background windows are appended to the tracked catalog; they move to the front when they become the focused window.
+- Initial ordering puts the currently focused window first and uses the Window Server's front-to-back order as a best-effort seed for other windows already open at startup.
+- Preserved the existing duplicate filtering, window identity rebinding, window filters, mouse-control preference, and settings UI.
+
+### Notes and limitations
+
+- macOS does not expose a complete historical MRU timeline for windows that were already open before WindowSwitcher starts. Their initial order after the current focused window is best effort.
+- Per-app focus tracking depends on Accessibility notifications. Some apps may rely on the polling fallback, which can introduce a short delay.
+- MRU history remains session-local and is rebuilt when WindowSwitcher is relaunched.
+
+### Build
+
+- Updated the app version to 0.4.0 and build number to 15.
+
 ## [0.3.9] - 2026-11-07
 
 ### Added
@@ -9,13 +37,12 @@ All notable changes to WindowSwitcher are documented in this file.
 - Added newest-opened-first ordering for individual windows.
 - Added a background discovery timer that samples the window list every 750 ms while the switcher is hidden.
 - Added application launch-date metadata to seed a best-effort initial order for windows already open when WindowSwitcher starts.
-- Added a new GitHub mockup illustrating the opened-time order.
+- Added a GitHub mockup illustrating the opened-time order.
 
 ### Changed
 
 - Newly discovered windows are inserted at the beginning of the switcher list.
 - Activating or switching to an existing window no longer changes the visible list order.
-- Replaced the previous alphabetical-first insertion behavior with open-time/discovery ordering.
 - Limited Accessibility identity-rebinding to recently seen windows, reducing the chance that a newly opened same-title window inherits an old entry's position.
 - The discovery loop pauses while the switcher overlay is visible to keep the displayed list stable during navigation.
 
@@ -23,8 +50,8 @@ All notable changes to WindowSwitcher are documented in this file.
 
 - macOS does not expose a reliable per-window creation timestamp for arbitrary existing windows. The order of windows already open at startup is seeded using application launch dates where possible and a deterministic title/geometry fallback.
 - Windows first detected in the same 750 ms polling pass use a deterministic tie-break; their exact chronological order may not be recoverable.
-- This is opened-time/discovery ordering, not most-recently-activated (MRU) ordering.
-- The discovery sequence is session-local and is rebuilt when WindowSwitcher is relaunched.
+- This was opened-time/discovery ordering, not most-recently-activated (MRU) ordering.
+- The discovery sequence was session-local and rebuilt when WindowSwitcher was relaunched.
 
 ### Build
 
@@ -53,13 +80,6 @@ All notable changes to WindowSwitcher are documented in this file.
 
 - Updated the app version to 0.3.8 and build number to 13.
 
-### Validation
-
-- Parsed all Swift source files using the Swift compiler frontend.
-- Validated the Swift package manifest.
-- Checked the build script with `bash -n`.
-- A complete AppKit build still needs to be run on macOS.
-
 ## [0.3.7] - 2026-11-07
 
 ### Fixed
@@ -87,7 +107,7 @@ All notable changes to WindowSwitcher are documented in this file.
 
 ### Changed
 
-- The sort order remained stable for the lifetime of the application and independent of which window was active.
+- Kept the sort order stable for the lifetime of the application and independent of which window was active.
 - Newly detected windows were appended deterministically to the existing order.
 - Distinct windows belonging to the same application remained visible as separate entries.
 

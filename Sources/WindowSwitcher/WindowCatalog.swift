@@ -166,11 +166,20 @@ final class WindowCatalog {
         return result
     }
 
-    /// Returns the currently focused window of the frontmost regular application.
+    /// Returns the focused window of the current frontmost regular application.
     func frontmostWindowIdentity() -> WindowIdentity? {
         guard let application = NSWorkspace.shared.frontmostApplication else { return nil }
-        let pid = application.processIdentifier
+        return focusedWindowIdentity(for: application.processIdentifier)
+    }
+
+    /// Returns the focused window for a specific process. This is also used by
+    /// AXObserver callbacks so focus changes between windows of one app can be
+    /// recorded without relying only on application-activation notifications.
+    func focusedWindowIdentity(for pid: pid_t) -> WindowIdentity? {
         let appElement = AXUIElementCreateApplication(pid)
+        // Keep focus polling bounded so a temporarily unresponsive app cannot
+        // hold up the switcher UI indefinitely.
+        _ = AXUIElementSetMessagingTimeout(appElement, 0.25)
 
         var focusedValue: CFTypeRef?
         if AXUIElementCopyAttributeValue(
@@ -189,6 +198,9 @@ final class WindowCatalog {
             }
         }
 
+        // Fallback for apps that do not expose AXFocusedWindow reliably: the
+        // front-to-back Window Server list usually places the focused app's
+        // key window first among its normal layer-0 windows.
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
