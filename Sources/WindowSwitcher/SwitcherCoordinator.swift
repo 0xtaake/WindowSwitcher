@@ -8,10 +8,9 @@ final class SwitcherCoordinator {
     private var windows: [WindowInfo] = []
     private var thumbnails: [CGWindowID: NSImage] = [:]
     private var thumbnailTargetIDs: [CGWindowID] = []
-    // Session-stable slots preserve visual order independently of the current
-    // front-to-back Window Server order. Exact WindowIdentity matches are used
-    // first; if macOS recreates a window ID, a same-app/same-title window is
-    // matched to its previous slot by nearest frame.
+    // Windows are ordered by first observation (newest first), not by current
+    // activation/Z-order. A background discovery timer records newly opened
+    // windows before the user invokes the switcher.
     private struct StableWindowGroup: Equatable {
         let bundleIdentifier: String
         let title: String
@@ -21,9 +20,16 @@ final class SwitcherCoordinator {
         var identity: WindowIdentity
         let group: StableWindowGroup
         var lastBounds: CGRect
+        var lastSeenAt: Date
     }
 
+    /// Entries are kept newest-first. Missing entries remain as short-lived
+    /// tombstones so brief Window Server/AX gaps do not reset their age/order.
     private var stableWindowEntries: [StableWindowEntry] = []
+    private var discoveryTimer: Timer?
+    private let discoveryInterval: TimeInterval = 0.75
+    private let identityRebindGrace: TimeInterval = 5.0
+    private let staleEntryLifetime: TimeInterval = 60 * 60 * 24 * 30
     private var selectedIndex = 0
     private var isVisible = false
     private var previewHideWorkItem: DispatchWorkItem?
@@ -31,6 +37,26 @@ final class SwitcherCoordinator {
     init() {
         panel.onHoverSelection = { [weak self] index in self?.select(index: index) }
         panel.onClickSelection = { [weak self] index in self?.commit(at: index) }
+    }
+
+    /// Start observing the window list before the first switcher invocation.
+    /// This lets WindowSwitcher detect newly opened windows instead of trying
+    /// to infer their creation order from the changing front-to-back Z-order.
+    func startWindowDiscovery() {
+        guard discoveryTimer == nil else { return }
+        _ = orderedSnapshot() // Seed windows that were already open.
+
+        let timer = Timer(timeInterval: discoveryInterval, repeats: true) { [weak self] _ in
+            guard let self, !self.isVisible else { return }
+            _ = self.orderedSnapshot()
+        }
+        discoveryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stopWindowDiscovery() {
+        discoveryTimer?.invalidate()
+        discoveryTimer = nil
     }
 
     func begin(reverse: Bool) {
@@ -118,10 +144,18 @@ final class SwitcherCoordinator {
     }
 
     private func orderedSnapshot() -> [WindowInfo] {
-        let snapshot = catalog.snapshot(settings: AppSettingsStore.shared.settings)
+        let visibleSettings = AppSettingsStore.shared.settings
+        var discoverySettings = visibleSettings
+        // Keep tracking all regular-app windows even when the user currently
+        // filters some categories out of the switcher. This avoids treating a
+        // previously hidden/minimized/excluded window as newly opened later.
+        discoverySettings.includeMinimizedWindows = true
+        discoverySettings.includeHiddenApplications = true
+        discoverySettings.includeWindowsOnOtherSpaces = true
+        discoverySettings.excludedBundleIdentifiers = []
+        let snapshot = catalog.snapshot(settings: discoverySettings)
         guard !snapshot.isEmpty else {
-            // Keep the previous order through transient empty snapshots. This
-            // prevents a temporary AX/Window Server gap from resetting the UI.
+            // Keep the tracked ordering through transient empty snapshots.
             return []
         }
 
@@ -129,23 +163,49 @@ final class SwitcherCoordinator {
         for window in snapshot {
             uniqueByIdentity[window.identity] = window
         }
+        let now = Date()
         var unmatched = Array(uniqueByIdentity.values)
-        var slotWindows: [Int: WindowInfo] = [:]
 
-        // 1. Preserve exact window identities whenever macOS keeps the same ID.
-        for slot in stableWindowEntries.indices {
-            guard let matchIndex = unmatched.firstIndex(where: {
-                $0.identity == stableWindowEntries[slot].identity
-            }) else { continue }
-            let window = unmatched.remove(at: matchIndex)
-            stableWindowEntries[slot].lastBounds = window.bounds
-            slotWindows[slot] = window
+        // First run: macOS does not expose per-window creation timestamps.
+        // Use process launch dates where available, then a stable fallback for
+        // multiple windows belonging to the same already-running application.
+        if stableWindowEntries.isEmpty {
+            let baseline = unmatched.sorted(by: initialWindowSort)
+            stableWindowEntries = baseline.map { window in
+                return StableWindowEntry(
+                    identity: window.identity,
+                    group: stableGroup(for: window),
+                    lastBounds: window.bounds,
+                    lastSeenAt: now
+                )
+            }
+            return baseline.filter { shouldDisplay($0, settings: visibleSettings) }
         }
 
-        // 2. If a CGWindowID changed, reuse the old slot for the same app/title.
-        // The nearest previous frame disambiguates multiple same-title windows.
-        for slot in stableWindowEntries.indices where slotWindows[slot] == nil {
-            let oldEntry = stableWindowEntries[slot]
+        let previousEntries = stableWindowEntries
+        var updatedEntries = previousEntries
+        var matchedEntryIndices = Set<Int>()
+        var existingWindowsBySlot: [Int: WindowInfo] = [:]
+
+        // 1. Match exact identities. Existing entries never move when activated.
+        for index in previousEntries.indices {
+            guard let matchIndex = unmatched.firstIndex(where: {
+                $0.identity == previousEntries[index].identity
+            }) else { continue }
+
+            let window = unmatched.remove(at: matchIndex)
+            updatedEntries[index].lastBounds = window.bounds
+            updatedEntries[index].lastSeenAt = now
+            matchedEntryIndices.insert(index)
+            existingWindowsBySlot[index] = window
+        }
+
+        // 2. If macOS recreated a window ID, only reuse a recently seen slot.
+        // Limiting this grace period prevents a newly opened same-title window
+        // from inheriting the age of an older, already closed window.
+        for index in previousEntries.indices where !matchedEntryIndices.contains(index) {
+            let oldEntry = previousEntries[index]
+            guard now.timeIntervalSince(oldEntry.lastSeenAt) <= identityRebindGrace else { continue }
             let candidates = unmatched.indices.filter {
                 stableGroup(for: unmatched[$0]) == oldEntry.group
             }
@@ -155,25 +215,61 @@ final class SwitcherCoordinator {
             }) else { continue }
 
             let window = unmatched.remove(at: matchIndex)
-            stableWindowEntries[slot].identity = window.identity
-            stableWindowEntries[slot].lastBounds = window.bounds
-            slotWindows[slot] = window
+            updatedEntries[index].identity = window.identity
+            updatedEntries[index].lastBounds = window.bounds
+            updatedEntries[index].lastSeenAt = now
+            matchedEntryIndices.insert(index)
+            existingWindowsBySlot[index] = window
         }
 
-        // 3. Only brand-new logical windows are sorted, then appended. Existing
-        // entries never move just because another window became frontmost.
+        // 3. Every newly discovered window is inserted at the front. Sorting
+        // only breaks ties for windows first observed in the same polling pass;
+        // it never uses current activation order as the persistent list order.
         let newWindows = unmatched.sorted(by: stableNewWindowSort)
-        for window in newWindows {
-            let entry = StableWindowEntry(
+        let newEntries = newWindows.map { window in
+            StableWindowEntry(
                 identity: window.identity,
                 group: stableGroup(for: window),
-                lastBounds: window.bounds
+                lastBounds: window.bounds,
+                lastSeenAt: now
             )
-            stableWindowEntries.append(entry)
-            slotWindows[stableWindowEntries.count - 1] = window
         }
 
-        return stableWindowEntries.indices.compactMap { slotWindows[$0] }
+        // Prune long-expired tombstones, but keep entries hidden by a transient
+        // snapshot gap long enough to preserve their original slot.
+        let retainedOldEntries = updatedEntries.filter {
+            now.timeIntervalSince($0.lastSeenAt) <= staleEntryLifetime
+        }
+        stableWindowEntries = newEntries + retainedOldEntries
+
+        let stillPresentOldWindows = previousEntries.indices.compactMap { index -> WindowInfo? in
+            guard matchedEntryIndices.contains(index) else { return nil }
+            return existingWindowsBySlot[index]
+        }
+        return (newWindows + stillPresentOldWindows).filter {
+            shouldDisplay($0, settings: visibleSettings)
+        }
+    }
+
+    private func shouldDisplay(_ window: WindowInfo, settings: AppSettings) -> Bool {
+        if settings.excludedBundleIdentifiers.contains(window.bundleIdentifier ?? "") { return false }
+        if window.isMinimized && !settings.includeMinimizedWindows { return false }
+        if window.isApplicationHidden && !settings.includeHiddenApplications { return false }
+        if !window.isOnCurrentSpace && !window.isMinimized && !window.isApplicationHidden
+            && !settings.includeWindowsOnOtherSpaces {
+            return false
+        }
+        return true
+    }
+
+    /// On the first snapshot, use application launch time as the best public
+    /// approximation for app ordering. The order of multiple windows from the
+    /// same pre-existing app cannot be recovered exactly from public macOS APIs.
+    private func initialWindowSort(_ lhs: WindowInfo, _ rhs: WindowInfo) -> Bool {
+        let lhsDate = lhs.applicationLaunchDate ?? .distantPast
+        let rhsDate = rhs.applicationLaunchDate ?? .distantPast
+        if lhsDate != rhsDate { return lhsDate > rhsDate }
+        return stableNewWindowSort(lhs, rhs)
     }
 
     private func stableGroup(for window: WindowInfo) -> StableWindowGroup {

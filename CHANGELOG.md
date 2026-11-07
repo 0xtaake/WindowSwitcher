@@ -2,6 +2,34 @@
 
 All notable changes to WindowSwitcher are documented in this file.
 
+## [0.3.9] - 2026-11-07
+
+### Added
+
+- Added newest-opened-first ordering for individual windows.
+- Added a background discovery timer that samples the window list every 750 ms while the switcher is hidden.
+- Added application launch-date metadata to seed a best-effort initial order for windows already open when WindowSwitcher starts.
+- Added a new GitHub mockup illustrating the opened-time order.
+
+### Changed
+
+- Newly discovered windows are inserted at the beginning of the switcher list.
+- Activating or switching to an existing window no longer changes the visible list order.
+- Replaced the previous alphabetical-first insertion behavior with open-time/discovery ordering.
+- Limited Accessibility identity-rebinding to recently seen windows, reducing the chance that a newly opened same-title window inherits an old entry's position.
+- The discovery loop pauses while the switcher overlay is visible to keep the displayed list stable during navigation.
+
+### Notes and limitations
+
+- macOS does not expose a reliable per-window creation timestamp for arbitrary existing windows. The order of windows already open at startup is seeded using application launch dates where possible and a deterministic title/geometry fallback.
+- Windows first detected in the same 750 ms polling pass use a deterministic tie-break; their exact chronological order may not be recoverable.
+- This is opened-time/discovery ordering, not most-recently-activated (MRU) ordering.
+- The discovery sequence is session-local and is rebuilt when WindowSwitcher is relaunched.
+
+### Build
+
+- Updated the app version to 0.3.9 and build number to 14.
+
 ## [0.3.8] - 2026-11-07
 
 ### Added
@@ -36,37 +64,32 @@ All notable changes to WindowSwitcher are documented in this file.
 
 ### Fixed
 
-- Removed the conditional cast `focusedValue as? AXUIElement`. `AXUIElement` is a Core Foundation type, and Swift diagnoses this conditional cast as always succeeding, which caused the build to fail.
+- Removed the conditional cast `focusedValue as? AXUIElement`. `AXUIElement` is a Core Foundation type, and Swift diagnoses this conditional cast as always succeeding.
 - The value is now checked using `CFGetTypeID(value) == AXUIElementGetTypeID()` before being bridged to `AXUIElement` with `unsafeBitCast`.
 - The existing Core Graphics fallback detection remains available when the focused-window value is missing or is not the expected type.
 
 ### Build
 
-- Updated the app version to 0.3.7 and the build number to 12.
+- Updated the app version to 0.3.7 and build number to 12.
 
 ## [0.3.6] - 2026-11-07
 
 ### Fixed
 
-- Replaced the compressed `NSTabView` settings layout. The **General**, **Windows**, and **Keyboard** pages are now switched using segmented navigation.
+- Replaced the compressed `NSTabView` settings layout with segmented navigation for General, Windows, and Keyboard pages.
 - Constrained settings-page content to the available window area and gave labels and help text a defined width.
 - Set the settings window's initial size to 800 × 620 pt and its minimum size to 760 × 580 pt.
 - Prevented window cards from changing positions during repeated `Option + Tab` presses due to the current Window Server order.
 - Prevented a temporarily empty Window Server or Accessibility snapshot from resetting the existing sort order.
-- Preserved a window's list position when macOS assigns a new `CGWindowID` to the same window. Matching uses the bundle identifier, window title, and last known geometry.
+- Preserved a window's list position when macOS assigns a new `CGWindowID` to the same window. Matching uses the bundle identifier, window title, and last known window position.
 - Removed duplicate Accessibility entries with the same window ID.
-- Checked Accessibility entries without a window ID for obvious duplicates using title and geometry.
-- Limited each Accessibility window to at most one matched Core Graphics entry. Ambiguous matches are discarded to avoid creating extra cards for helper windows.
+- Limited each Accessibility window to at most one matched Core Graphics entry.
 
 ### Changed
 
-- The sort order now remains stable for the lifetime of the application and is independent of which window is currently active.
-- Newly detected windows are appended deterministically to the existing order.
-- Distinct windows belonging to the same application remain visible as separate entries.
-
-### Notes
-
-- Space detection remains best effort because of limitations in the public macOS APIs.
+- The sort order remained stable for the lifetime of the application and independent of which window was active.
+- Newly detected windows were appended deterministically to the existing order.
+- Distinct windows belonging to the same application remained visible as separate entries.
 
 ## [0.3.5]
 

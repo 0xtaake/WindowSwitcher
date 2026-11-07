@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
+        switcher.startWindowDiscovery()
 
         keyboardMonitor.shortcut = ShortcutConfiguration(settings: AppSettingsStore.shared.settings)
         keyboardMonitor.onBegin = { [weak self] reverse in
@@ -33,7 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !started { keyboardMonitor.requestAccessibilityPermission() }
     }
 
-    func applicationWillTerminate(_ notification: Notification) { keyboardMonitor.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        keyboardMonitor.stop()
+        switcher.stopWindowDiscovery()
+    }
 
     @objc private func requestPermissions() {
         keyboardMonitor.requestAccessibilityPermission()

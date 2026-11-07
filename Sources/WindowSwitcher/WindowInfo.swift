@@ -13,6 +13,7 @@ struct WindowInfo: Identifiable {
     let appName: String
     let title: String
     let icon: NSImage?
+    let applicationLaunchDate: Date?
     let bounds: CGRect
     var thumbnail: NSImage? = nil
     var isMinimized = false
