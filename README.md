@@ -1,5 +1,7 @@
 # WindowSwitcher
 
+This application was vibecoded with ChatGPT Go. 
+
 A native macOS window switcher built with Swift and AppKit. WindowSwitcher presents individual application windows in a keyboard-driven overview, with optional mouse selection, configurable appearance, and window filters.
 
 > **UI mockups:** The images below are illustrative, AI-assisted design mockups. They are not screenshots captured from a running build and may contain visual details that differ from the current implementation.
