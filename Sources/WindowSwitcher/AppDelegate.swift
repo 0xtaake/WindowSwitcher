@@ -66,11 +66,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showOverviewForDiagnostics() { switcher.previewOverviewForDiagnostics() }
 
     @objc private func openPreferences() {
-        settingsWindow.show(settings: AppSettingsStore.shared.settings) { [weak self] newSettings in
-            AppSettingsStore.shared.save(newSettings)
-            self?.keyboardMonitor.shortcut = ShortcutConfiguration(settings: newSettings)
-            self?.updateStatusMenu(eventTapReady: self?.keyboardMonitor.isRunning ?? false)
+        var settings = AppSettingsStore.shared.settings
+        settings.launchAtLoginEnabled = LoginItemManager.isEnabledOrPendingApproval
+        settings.includeWindowsOnOtherSpaces = false
+        settingsWindow.show(settings: settings) { [weak self] newSettings in
+            guard let self else { return }
+            var settingsToSave = newSettings
+            settingsToSave.includeWindowsOnOtherSpaces = false
+
+            do {
+                try LoginItemManager.setEnabled(newSettings.launchAtLoginEnabled)
+            } catch {
+                settingsToSave.launchAtLoginEnabled = LoginItemManager.isEnabledOrPendingApproval
+                self.presentLoginItemError(error)
+            }
+
+            settingsToSave.launchAtLoginEnabled = LoginItemManager.isEnabledOrPendingApproval
+            AppSettingsStore.shared.save(settingsToSave)
+            self.keyboardMonitor.shortcut = ShortcutConfiguration(settings: settingsToSave)
+            self.updateStatusMenu(eventTapReady: self.keyboardMonitor.isRunning)
         }
+    }
+
+    private func presentLoginItemError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Autostart konnte nicht geändert werden"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Anmeldeobjekte öffnen")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            LoginItemManager.openSystemSettings()
+        }
+    }
+
+    @objc private func openLoginItemsSettings() {
+        LoginItemManager.openSystemSettings()
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
@@ -100,6 +132,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let preferencesItem = NSMenuItem(title: "Einstellungen …", action: #selector(openPreferences), keyEquivalent: ",")
         preferencesItem.target = self
         menu.addItem(preferencesItem)
+
+        if LoginItemManager.requiresApproval {
+            let loginItem = NSMenuItem(title: "Anmeldeobjekte in Systemeinstellungen prüfen …", action: #selector(openLoginItemsSettings), keyEquivalent: "")
+            loginItem.target = self
+            menu.addItem(loginItem)
+        }
 
         let permissionItem = NSMenuItem(title: "Bedienungshilfen öffnen …", action: #selector(requestPermissions), keyEquivalent: "")
         permissionItem.target = self

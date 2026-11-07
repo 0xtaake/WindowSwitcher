@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="WindowSwitcher"
-APP_VERSION="0.4.2"
-BUILD_NUMBER="18"
+APP_VERSION="0.4.5"
+BUILD_NUMBER="21"
 APP_DIR="$ROOT_DIR/build/$APP_NAME.app"
 EXECUTABLE="$ROOT_DIR/.build/release/$APP_NAME"
 ICONSET_DIR="$ROOT_DIR/.build/AppIcon.iconset"
@@ -47,6 +47,7 @@ mkdir -p "$ROOT_DIR/.build/release" "$ROOT_DIR/.build/ModuleCache"
   -framework ApplicationServices \
   -framework CoreGraphics \
   -framework ScreenCaptureKit \
+  -framework ServiceManagement \
   "${SWIFT_SOURCES[@]}" \
   -o "$EXECUTABLE"
 

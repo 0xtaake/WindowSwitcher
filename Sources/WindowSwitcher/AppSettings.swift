@@ -52,17 +52,18 @@ enum ShortcutKey: String, Codable, CaseIterable, Identifiable {
 struct AppSettings: Codable, Equatable {
     var includeMinimizedWindows = true
     var includeHiddenApplications = true
-    var includeWindowsOnOtherSpaces = true
-    /// Persisted under the legacy `excludeCurrentWindowFromSwitcher` key for
-    /// backwards compatibility. The behavior now excludes the entire active
-    /// application, identified by process ID and bundle identifier. This is
-    /// more reliable for apps such as Chromium-based browsers whose focused
-    /// AX window number may be unavailable or inconsistent.
+    /// Kept in the encoded model for backwards compatibility. Other Spaces are
+    /// now always excluded from the switcher; this value is intentionally false.
+    var includeWindowsOnOtherSpaces = false
+    /// Excludes only the exact window that was focused when the switcher
+    /// shortcut was pressed. The legacy encoded key is retained so settings
+    /// from versions 0.4.1 and 0.4.2 continue to load.
     var excludeCurrentWindowFromSwitcher = false
 
-    /// Semantic name used by the current UI and switcher logic. The stored
-    /// property above is intentionally retained so existing preferences load.
-    var excludeCurrentApplicationFromSwitcher: Bool {
+    /// Clear semantic name for the setting. Other windows belonging to the
+    /// same application (for example a normal and a private Brave window)
+    /// remain eligible for switching.
+    var excludeActiveWindowFromSwitcher: Bool {
         get { excludeCurrentWindowFromSwitcher }
         set { excludeCurrentWindowFromSwitcher = newValue }
     }
@@ -82,6 +83,8 @@ struct AppSettings: Codable, Equatable {
     var mouseControlEnabled = true
 
     var appearance: String = "system"
+    /// Mirrors the user-level macOS Login Item registration state.
+    var launchAtLoginEnabled = false
 
     var requiredModifierMask: CGEventFlags {
         var result: CGEventFlags = []
@@ -112,6 +115,7 @@ struct AppSettings: Codable, Equatable {
         case shortcutUsesControl
         case mouseControlEnabled
         case appearance
+        case launchAtLoginEnabled
     }
 
     init() {}
@@ -120,7 +124,8 @@ struct AppSettings: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         includeMinimizedWindows = try container.decodeIfPresent(Bool.self, forKey: .includeMinimizedWindows) ?? true
         includeHiddenApplications = try container.decodeIfPresent(Bool.self, forKey: .includeHiddenApplications) ?? true
-        includeWindowsOnOtherSpaces = try container.decodeIfPresent(Bool.self, forKey: .includeWindowsOnOtherSpaces) ?? true
+        // Do not restore the legacy all-Spaces setting from older preferences.
+        includeWindowsOnOtherSpaces = false
         excludeCurrentWindowFromSwitcher = try container.decodeIfPresent(Bool.self, forKey: .excludeCurrentWindowFromSwitcher) ?? false
         excludedBundleIdentifiers = try container.decodeIfPresent([String].self, forKey: .excludedBundleIdentifiers) ?? []
         visualStyle = try container.decodeIfPresent(SwitcherVisualStyle.self, forKey: .visualStyle) ?? .thumbnails
@@ -131,6 +136,7 @@ struct AppSettings: Codable, Equatable {
         shortcutUsesControl = try container.decodeIfPresent(Bool.self, forKey: .shortcutUsesControl) ?? false
         mouseControlEnabled = try container.decodeIfPresent(Bool.self, forKey: .mouseControlEnabled) ?? true
         appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "system"
+        launchAtLoginEnabled = try container.decodeIfPresent(Bool.self, forKey: .launchAtLoginEnabled) ?? false
     }
 }
 

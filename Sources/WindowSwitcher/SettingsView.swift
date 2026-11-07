@@ -26,12 +26,16 @@ final class SettingsViewController: NSViewController {
         target: nil,
         action: nil
     )
+    private let launchAtLoginCheckbox = NSButton(
+        checkboxWithTitle: "Beim Anmelden automatisch starten",
+        target: nil,
+        action: nil
+    )
 
     private let includeMinimizedCheckbox = NSButton(checkboxWithTitle: "Minimierte Fenster einschließen", target: nil, action: nil)
-    private let includeHiddenCheckbox = NSButton(checkboxWithTitle: "Fenster ausgeblendeter Apps einschließen", target: nil, action: nil)
-    private let includeOtherSpacesCheckbox = NSButton(checkboxWithTitle: "Fenster anderer Spaces einschließen", target: nil, action: nil)
-    private let excludeCurrentApplicationCheckbox = NSButton(
-        checkboxWithTitle: "Aktive Anwendung ausblenden",
+    private let includeHiddenCheckbox = NSButton(checkboxWithTitle: "Fenster ausgeblendeter Apps berücksichtigen", target: nil, action: nil)
+    private let excludeActiveWindowCheckbox = NSButton(
+        checkboxWithTitle: "Aktuelles Fenster ausblenden",
         target: nil,
         action: nil
     )
@@ -152,8 +156,8 @@ final class SettingsViewController: NSViewController {
 
         includeMinimizedCheckbox.state = draft.includeMinimizedWindows ? .on : .off
         includeHiddenCheckbox.state = draft.includeHiddenApplications ? .on : .off
-        includeOtherSpacesCheckbox.state = draft.includeWindowsOnOtherSpaces ? .on : .off
-        excludeCurrentApplicationCheckbox.state = draft.excludeCurrentApplicationFromSwitcher ? .on : .off
+        launchAtLoginCheckbox.state = draft.launchAtLoginEnabled ? .on : .off
+        excludeActiveWindowCheckbox.state = draft.excludeActiveWindowFromSwitcher ? .on : .off
         excludedIDsField.stringValue = draft.excludedBundleIdentifiers.joined(separator: ", ")
         excludedIDsField.placeholderString = "com.apple.finder, com.apple.Terminal"
         excludedIDsField.widthAnchor.constraint(equalToConstant: 690).isActive = true
@@ -181,31 +185,33 @@ final class SettingsViewController: NSViewController {
         columnsControls.alignment = .centerY
         columnsControls.spacing = 8
         let columnsRow = labeledRow("Kachelraster", control: columnsControls)
-        let spacesHelp = wrappingLabel("Fenster anderer Spaces werden nach Möglichkeit anhand der macOS-Fensterliste erkannt. Eine eindeutige Space-ID stellt macOS über diese öffentliche Schnittstelle nicht bereit.", width: 690)
+        let loginHelp = wrappingLabel("WindowSwitcher wird beim Anmelden automatisch gestartet. macOS kann eine Bestätigung unter Systemeinstellungen → Allgemein → Anmeldeobjekte verlangen. Administratorrechte sind dafür nicht erforderlich.", width: 690)
         let mouseHelp = wrappingLabel("Wenn deaktiviert, reagieren die Fensterkarten weder auf Mausbewegungen noch auf Mausklicks. Die Navigation mit Tastatur und Tastenkombinationen bleibt vollständig verfügbar.", width: 690)
         return makePage([
             sectionLabel("Darstellung"), styleRow, appearanceRow, columnsRow,
             NSBox.separator(),
             sectionLabel("Maussteuerung"), mouseControlCheckbox, mouseHelp,
-            spacesHelp
+            NSBox.separator(),
+            sectionLabel("Autostart"), launchAtLoginCheckbox, loginHelp
         ])
     }
 
     private func makeWindowsView() -> NSView {
         let exclusionsHint = wrappingLabel("Bundle-Identifier der auszuschließenden Apps, durch Kommas getrennt. Die Änderung wird beim Speichern übernommen.", width: 690)
-        let activeApplicationHint = wrappingLabel(
-            "Alle Fenster der Anwendung, die beim Öffnen von Option + Tab im Vordergrund ist, werden ausgeblendet. Die Erkennung nutzt Prozess-ID und Bundle-ID statt AXWindowNumber – wichtig für Brave und andere Chromium-Browser.",
+        let currentSpaceHint = wrappingLabel("Die Übersicht zeigt ausschließlich Fenster, die macOS aktuell als auf dem Bildschirm sichtbar meldet. Fenster anderer Spaces werden grundsätzlich ausgefiltert. Minimierte Fenster sind eine optionale Ausnahme, da macOS deren ursprüngliche Space-Zuordnung nicht zuverlässig bereitstellt.", width: 690)
+        let activeWindowHint = wrappingLabel(
+            "Nur das aktuell fokussierte Fenster wird aus der Liste entfernt. Andere Fenster derselben Anwendung bleiben sichtbar – zum Beispiel dein privates Brave-Fenster, wenn du Option + Tab aus dem normalen Brave-Fenster aufrufst. Die Erkennung verwendet die konkrete Window-Server-Fenster-ID und bevorzugt das vorderste Fenster der aktiven Anwendung.",
             width: 690
         )
         return makePage([
             sectionLabel("Welche Fenster anzeigen?"),
             includeMinimizedCheckbox,
             includeHiddenCheckbox,
-            includeOtherSpacesCheckbox,
+            currentSpaceHint,
             NSBox.separator(),
-            sectionLabel("Aktuelle Anwendung"),
-            excludeCurrentApplicationCheckbox,
-            activeApplicationHint,
+            sectionLabel("Aktuelles Fenster"),
+            excludeActiveWindowCheckbox,
+            activeWindowHint,
             NSBox.separator(),
             sectionLabel("Ausnahmen"),
             exclusionsHint,
@@ -320,8 +326,9 @@ final class SettingsViewController: NSViewController {
         result.mouseControlEnabled = mouseControlCheckbox.state == .on
         result.includeMinimizedWindows = includeMinimizedCheckbox.state == .on
         result.includeHiddenApplications = includeHiddenCheckbox.state == .on
-        result.includeWindowsOnOtherSpaces = includeOtherSpacesCheckbox.state == .on
-        result.excludeCurrentApplicationFromSwitcher = excludeCurrentApplicationCheckbox.state == .on
+        result.includeWindowsOnOtherSpaces = false
+        result.launchAtLoginEnabled = launchAtLoginCheckbox.state == .on
+        result.excludeActiveWindowFromSwitcher = excludeActiveWindowCheckbox.state == .on
         result.excludedBundleIdentifiers = excludedIDsField.stringValue
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

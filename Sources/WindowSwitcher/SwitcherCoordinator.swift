@@ -103,41 +103,26 @@ final class SwitcherCoordinator {
     func begin(reverse: Bool) {
         previewHideWorkItem?.cancel()
 
-        // Capture the frontmost application before showing our overlay. Do not
-        // rely on AXFocusedWindow/AXWindowNumber for this preference: some apps
-        // (notably Chromium-based browsers such as Brave) do not expose a stable
-        // focused-window number. PID plus bundle ID identifies the application
-        // independently of its Accessibility implementation.
+        // Resolve the exact focused window before the overlay becomes
+        // frontmost. Exclusion is based on (PID, CGWindowID), not the bundle ID
+        // or application PID alone: another window of the same app must remain
+        // in the list (e.g. normal and private Brave windows).
         let settings = AppSettingsStore.shared.settings
-        let activeApplication = NSWorkspace.shared.frontmostApplication
-        let activeIdentity = catalog.frontmostWindowIdentity()
         let orderedWindows = orderedSnapshot()
+        let activeIdentity = catalog.frontmostWindowIdentity(in: orderedWindows)
+        let didExcludeActiveWindow = settings.excludeActiveWindowFromSwitcher
+            && activeIdentity.map { identity in orderedWindows.contains { $0.identity == identity } } == true
 
-        let activeApplicationWindows: [WindowInfo]
-        if let activeApplication {
-            activeApplicationWindows = orderedWindows.filter {
-                belongsToApplication($0, application: activeApplication)
-            }
-        } else {
-            activeApplicationWindows = []
-        }
-
-        let didExcludeActiveApplication = settings.excludeCurrentApplicationFromSwitcher
-            && !activeApplicationWindows.isEmpty
-
-        if didExcludeActiveApplication, let activeApplication {
-            windows = orderedWindows.filter {
-                !belongsToApplication($0, application: activeApplication)
-            }
+        if didExcludeActiveWindow, let activeIdentity {
+            windows = orderedWindows.filter { $0.identity != activeIdentity }
             NSLog(
-                "WindowSwitcher: Aktive Anwendung ausgeblendet: \(activeApplication.localizedName ?? "Unbekannt") (PID \(activeApplication.processIdentifier), \(activeApplicationWindows.count) Fenster)."
+                "WindowSwitcher: Aktuelles Fenster ausgeblendet (PID \(activeIdentity.ownerPID), WindowID \(activeIdentity.windowID)). Andere Fenster derselben Anwendung bleiben sichtbar."
             )
         } else {
             windows = orderedWindows
-            if settings.excludeCurrentApplicationFromSwitcher {
-                let appName = activeApplication?.localizedName ?? "unbekannt"
+            if settings.excludeActiveWindowFromSwitcher {
                 NSLog(
-                    "WindowSwitcher: Aktive Anwendung \(appName) konnte in der Fensterliste nicht gefunden werden; Liste bleibt unverändert."
+                    "WindowSwitcher: Aktives Fenster konnte nicht eindeutig identifiziert werden; Liste bleibt unverändert."
                 )
             }
         }
@@ -151,9 +136,10 @@ final class SwitcherCoordinator {
         thumbnailTargetIDs = []
         isVisible = true
 
-        if didExcludeActiveApplication {
-            // All windows belonging to the active application are absent. The
-            // first remaining MRU entry is the next eligible application/window.
+        if didExcludeActiveWindow {
+            // The active window alone is absent. Since MRU index 0 was the
+            // active window, the next-most-recent window (including another
+            // window of the same application) is now the first selectable one.
             selectedIndex = reverse ? windows.count - 1 : 0
         } else if let activeIdentity,
                   let activeIndex = windows.firstIndex(where: { $0.identity == activeIdentity }),
@@ -301,7 +287,8 @@ final class SwitcherCoordinator {
         // some categories out. It can still participate in MRU history.
         discoverySettings.includeMinimizedWindows = true
         discoverySettings.includeHiddenApplications = true
-        discoverySettings.includeWindowsOnOtherSpaces = true
+        // Never seed the MRU catalog with windows from inactive Spaces.
+        discoverySettings.includeWindowsOnOtherSpaces = false
         discoverySettings.excludedBundleIdentifiers = []
 
         let snapshot = catalog.snapshot(settings: discoverySettings)
@@ -320,7 +307,7 @@ final class SwitcherCoordinator {
         }
 
         let now = Date()
-        let activeIdentity = catalog.frontmostWindowIdentity()
+        let activeIdentity = catalog.frontmostWindowIdentity(in: snapshotWindows)
 
         if mruWindowEntries.isEmpty {
             // For windows already open at app launch, the Window Server list is
@@ -410,24 +397,13 @@ final class SwitcherCoordinator {
             .filter { shouldDisplay($0, settings: visibleSettings) }
     }
 
-    /// Match a Window Server/Accessibility window to the frontmost app without
-    /// requiring AXWindowNumber. PID is authoritative for the main process;
-    /// bundle ID also covers additional regular processes belonging to the app.
-    private func belongsToApplication(_ window: WindowInfo, application: NSRunningApplication) -> Bool {
-        if window.ownerPID == application.processIdentifier { return true }
-        guard let activeBundleIdentifier = application.bundleIdentifier,
-              !activeBundleIdentifier.isEmpty else { return false }
-        return window.bundleIdentifier == activeBundleIdentifier
-    }
-
     private func shouldDisplay(_ window: WindowInfo, settings: AppSettings) -> Bool {
         if settings.excludedBundleIdentifiers.contains(window.bundleIdentifier ?? "") { return false }
         if window.isMinimized && !settings.includeMinimizedWindows { return false }
         if window.isApplicationHidden && !settings.includeHiddenApplications { return false }
-        if !window.isOnCurrentSpace && !window.isMinimized && !window.isApplicationHidden
-            && !settings.includeWindowsOnOtherSpaces {
-            return false
-        }
+        // Enforce the active-Space scope even if a legacy preferences file
+        // contains includeWindowsOnOtherSpaces = true.
+        if !window.isOnCurrentSpace && !window.isMinimized { return false }
         return true
     }
 

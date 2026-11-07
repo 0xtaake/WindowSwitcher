@@ -10,7 +10,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "WindowSwitcher",
-            path: "Sources/WindowSwitcher"
+            path: "Sources/WindowSwitcher",
+            linkerSettings: [
+                .linkedFramework("ServiceManagement")
+            ]
         )
     ],
     swiftLanguageVersions: [.v5]

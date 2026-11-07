@@ -2,10 +2,10 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 
-/// Reads Window Server metadata and enriches it with Accessibility attributes.
-/// A one-to-one match is enforced between Core Graphics entries and AX windows.
-/// Duplicate AX elements and helper Window Server records are filtered before
-/// they can become separate switcher cards.
+/// Uses Core Graphics Window Server records as the canonical source for
+/// top-level windows and enriches them with Accessibility attributes when a
+/// reliable match exists. AX metadata is optional: an incomplete AX tree must
+/// never make an otherwise valid app window disappear from the switcher.
 final class WindowCatalog {
     private struct AXWindowDescriptor {
         let element: AXUIElement
@@ -18,7 +18,10 @@ final class WindowCatalog {
 
     func snapshot(settings: AppSettings) -> [WindowInfo] {
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+        // Query only the windows currently on-screen. `optionAll` also returns
+        // windows from inactive Spaces and can inflate the switcher with dozens
+        // of windows that are not part of the user's current desktop.
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 
         guard let rawWindows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return []
@@ -35,7 +38,6 @@ final class WindowCatalog {
         var result: [WindowInfo] = []
         var seenCGWindowIDs = Set<CGWindowID>()
         var usedAXDescriptorIndices: [pid_t: Set<Int>] = [:]
-        var fallbackFingerprints: [pid_t: Set<String>] = [:]
 
         for dictionary in rawWindows {
             guard
@@ -58,7 +60,9 @@ final class WindowCatalog {
 
             let cgTitle = dictionary[kCGWindowName as String] as? String
             let cgBounds = bounds(from: dictionary)
-            let onScreen = (dictionary[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
+            // The query is `.optionOnScreenOnly`; default to true if this
+            // optional metadata key is absent.
+            let onScreen = (dictionary[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? true
             let descriptors = axByPID[pid] ?? []
             let usedIndices = usedAXDescriptorIndices[pid] ?? []
 
@@ -71,29 +75,31 @@ final class WindowCatalog {
             )
 
             let descriptor: AXWindowDescriptor?
-            if !descriptors.isEmpty {
-                // If an app exposes AX windows, only show CG entries that can
-                // be paired with one unique AX window. This suppresses helper
-                // surfaces and duplicate Window Server representations.
-                guard let descriptorIndex else { continue }
+            if let descriptorIndex {
+                // Accessibility enriches a Window Server record when a reliable
+                // match exists. It is deliberately not a prerequisite for
+                // displaying the window: Chromium-based browsers (including
+                // Brave) can expose AX titles/frames that differ from the
+                // corresponding CG metadata, which previously caused every
+                // unmatched CG window to be dropped.
                 usedAXDescriptorIndices[pid, default: []].insert(descriptorIndex)
                 descriptor = descriptors[descriptorIndex]
             } else {
+                // Core Graphics is the source of truth for visible top-level
+                // windows. Keep a valid layer-0 CG window even when AX cannot
+                // be paired with it. CGWindowID already provides per-window
+                // identity, so do not collapse two real windows merely because
+                // their titles and geometries happen to be identical.
                 descriptor = nil
-                if let cgBounds {
-                    let normalizedTitle = normalized(cgTitle).isEmpty
-                        ? appNameFallback(application: application).lowercased()
-                        : normalized(cgTitle)
-                    let fingerprint = frameFingerprint(title: normalizedTitle, frame: cgBounds)
-                    guard fallbackFingerprints[pid, default: []].insert(fingerprint).inserted else {
-                        continue
-                    }
-                }
             }
 
             let minimized = descriptor?.minimized ?? false
             if minimized && !settings.includeMinimizedWindows { continue }
-            if !onScreen && !minimized && !isHidden && !settings.includeWindowsOnOtherSpaces { continue }
+            // The switcher is intentionally limited to windows currently reported
+            // as on-screen by Window Server. Off-space windows are never shown.
+            // Minimized windows remain a separate opt-in exception because macOS
+            // does not expose their former Space reliably.
+            if !onScreen && !minimized { continue }
 
             let alpha = (dictionary[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
             if alpha <= 0.001 && !minimized && !isHidden { continue }
@@ -166,10 +172,73 @@ final class WindowCatalog {
         return result
     }
 
-    /// Returns the focused window of the current frontmost regular application.
-    func frontmostWindowIdentity() -> WindowIdentity? {
-        guard let application = NSWorkspace.shared.frontmostApplication else { return nil }
-        return focusedWindowIdentity(for: application.processIdentifier)
+    /// Resolves the exact frontmost window that should be excluded from the
+    /// switcher. This is deliberately window-specific: sibling windows of the
+    /// same application must remain visible (e.g. a private Brave window).
+    ///
+    /// The Window Server's front-to-back order is preferred for the active
+    /// process because Chromium-based apps may not expose a reliable
+    /// AXWindowNumber for AXFocusedWindow. Accessibility is used as a validated
+    /// fallback, never as an unchecked application-wide match.
+    func frontmostWindowIdentity(in candidates: [WindowInfo]) -> WindowIdentity? {
+        guard !candidates.isEmpty,
+              let application = NSWorkspace.shared.frontmostApplication else { return nil }
+
+        let candidateIdentities = Set(candidates.map(\.identity))
+        let activePID = application.processIdentifier
+
+        if let identity = windowServerFrontmostIdentity(for: Set([activePID])),
+           candidateIdentities.contains(identity) {
+            return identity
+        }
+
+        if let identity = focusedWindowIdentity(for: activePID),
+           candidateIdentities.contains(identity) {
+            return identity
+        }
+
+        // Some browsers expose their top-level window under a regular helper
+        // process with the same bundle identifier. Only use this fallback when
+        // no window owned by the frontmost application's PID was resolvable.
+        if let bundleIdentifier = application.bundleIdentifier, !bundleIdentifier.isEmpty {
+            let siblingPIDs = Set(NSWorkspace.shared.runningApplications.compactMap { candidate -> pid_t? in
+                guard candidate.activationPolicy == .regular,
+                      candidate.bundleIdentifier == bundleIdentifier else { return nil }
+                return candidate.processIdentifier
+            })
+            if let identity = windowServerFrontmostIdentity(for: siblingPIDs),
+               candidateIdentities.contains(identity) {
+                return identity
+            }
+        }
+
+        // Fail open when the active window cannot be identified exactly.
+        // Choosing an arbitrary window from the MRU list could hide the wrong
+        // Brave window, so never guess based only on the application PID.
+        return nil
+    }
+
+    private func windowServerFrontmostIdentity(for processIDs: Set<pid_t>) -> WindowIdentity? {
+        guard !processIDs.isEmpty,
+              let dictionaries = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID
+              ) as? [[String: Any]] else { return nil }
+
+        for dictionary in dictionaries {
+            guard
+                let owner = (dictionary[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                processIDs.contains(pid_t(owner)),
+                (dictionary[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                let number = (dictionary[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                number != 0
+            else { continue }
+
+            let alpha = (dictionary[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
+            guard alpha > 0.001 else { continue }
+            return WindowIdentity(ownerPID: pid_t(owner), windowID: number)
+        }
+        return nil
     }
 
     /// Returns the focused window for a specific process. This is also used by
@@ -338,9 +407,8 @@ final class WindowCatalog {
                 < descriptorScore(descriptors[$1], title: title, bounds: bounds)
         }) else { return nil }
 
-        // Refuse uncertain matches. A false match can duplicate one visible
-        // app window as multiple cards; omitting an unmatchable helper surface
-        // is preferable to fabricating another user-facing window.
+        // Only use AX metadata when the match is sufficiently plausible. The
+        // caller still keeps the Core Graphics window when this returns nil.
         return descriptorScore(descriptors[bestIndex], title: title, bounds: bounds) < 45_000
             ? bestIndex
             : nil
@@ -351,7 +419,11 @@ final class WindowCatalog {
         let cgTitle = normalized(title)
         let axTitle = normalized(descriptor.title)
         if !cgTitle.isEmpty && !axTitle.isEmpty {
-            if cgTitle != axTitle { return 1_000_000 }
+            // Window Server and Accessibility titles are not always byte-for-
+            // byte identical (notably in Chromium browsers). Prefer equal
+            // titles, but let geometry establish a valid metadata match when
+            // the title strings differ.
+            if cgTitle != axTitle { score += 25_000 }
         } else {
             score += 12_000
         }
@@ -380,20 +452,11 @@ final class WindowCatalog {
         return "\(title)|\(Int(position.x.rounded()))|\(Int(position.y.rounded()))|\(Int(size.width.rounded()))|\(Int(size.height.rounded()))"
     }
 
-    private func frameFingerprint(title: String, frame: CGRect) -> String {
-        func bucket(_ value: CGFloat) -> Int { Int((value / 8).rounded()) }
-        return "\(title)|\(bucket(frame.origin.x))|\(bucket(frame.origin.y))|\(bucket(frame.width))|\(bucket(frame.height))"
-    }
-
     private func normalized(_ value: String?) -> String {
         (value ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .lowercased()
-    }
-
-    private func appNameFallback(application: NSRunningApplication) -> String {
-        application.localizedName ?? application.bundleIdentifier ?? ""
     }
 
     private func bestAccessibilityMatch(in windows: [AXUIElement], for target: WindowInfo) -> AXUIElement? {

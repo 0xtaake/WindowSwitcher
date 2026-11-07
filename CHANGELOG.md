@@ -1,109 +1,105 @@
 # Changelog
 
-All notable changes to WindowSwitcher are documented in this file.
+All notable changes to WindowSwitcher are documented here.
 
-## [0.4.2] - 2026-11-07
-
-### Fixed
-
-- Active-app exclusion now removes **all windows belonging to the frontmost application**, rather than trying to match only one focused window.
-- Match the active app by process ID and bundle identifier. This avoids relying on `AXWindowNumber` and fixes the failure mode where Brave or another Chromium-based browser does not provide a focused AX window number that matches its Window Server entry.
-- If the active app cannot be identified or no matching windows are in the current catalog, fail open and leave the switcher list unchanged. A diagnostic message is emitted.
-- Retain the existing `excludeCurrentWindowFromSwitcher` preference key so saved configurations from 0.4.1 remain readable. The enabled behavior is now application-wide.
-
-### Build
-
-- Replace SwiftPM's `swift build -c release` app build with direct `xcrun swiftc` compilation using the selected macOS SDK.
-- Link AppKit, ApplicationServices, CoreGraphics, and ScreenCaptureKit explicitly.
-- Avoid the invalid `CommandLineTools/Developer/usr/lib` and `CommandLineTools/Developer/Library/Frameworks` search paths emitted by some SwiftPM `swiftbuild` + standalone Command Line Tools combinations.
-- Keep `Package.swift` for IDE and package integration; `scripts/build-app.sh` is the supported app-bundle build path.
-
-### Documentation
-
-- Update README to describe app-wide exclusion, Brave/Chromium handling, preference compatibility, and the direct compiler build path.
-
-## [0.4.1] - 2026-11-07
+## [0.4.5] - 2026-11-07
 
 ### Added
-
-- Added an optional setting to exclude the currently focused window from the switcher.
-- When enabled, the next-most-recent window becomes the first selectable item.
-- Existing settings files default the new option to `false`.
-
-## [0.4.0] - 2026-11-07
-
-### Added
-
-- Added most-recently-used (MRU) ordering for individual windows.
-- Added intra-application focus tracking through Accessibility notifications.
-- Added application activation tracking through `NSWorkspace` notifications.
-- Added a polling fallback for applications that do not publish focus notifications reliably.
-- Added an MRU ordering UI mockup.
-
-## [0.3.9] - 2026-11-07
+- Launch at login toggle in **Settings → General** using Apple's `SMAppService.mainApp` API.
+- Status handling for enabled and approval-pending login item states.
+- A menu bar shortcut to open Login Items settings when macOS approval is pending.
+- Explicit ServiceManagement framework linkage in the direct `swiftc` build script and Swift package manifest.
 
 ### Changed
+- Window discovery now uses `CGWindowListCopyWindowInfo(.optionOnScreenOnly)`, so regular windows from inactive Spaces are never added to the catalog or MRU history.
+- The legacy `includeWindowsOnOtherSpaces` preference is retained for decoding older settings but is always forced to `false`.
+- The Windows settings page explains current-Space-only behavior and the minimized-window exception.
 
-- Added an initial opened-time ordering concept with background discovery of newly opened windows.
-- Updated README and mockups to explain the opened-time ordering model.
+### Compatibility and limitations
+- Existing user preferences remain readable; launch-at-login defaults to off.
+- Minimized windows remain an optional exception because macOS does not expose a reliable public Space identifier for them.
+- Launch-at-login registration is per-user and does not require administrator privileges. macOS may request approval in System Settings.
 
-## [0.3.8] - 2026-11-07
+## [0.4.4]
+
+### Fixed
+- Kept valid Core Graphics windows when Accessibility metadata could not be matched, improving browser window discovery.
+- Retained per-window identity based on owner PID and CGWindowID.
+- Updated build script to invoke the selected Swift compiler directly and avoid invalid SwiftPM linker search paths.
+
+## [0.4.3]
+
+### Fixed
+- Changed active-window exclusion to target a specific window rather than the entire application.
+- Preserved other windows from the same app, including separate normal and private browser windows.
+
+## [0.4.2]
+
+### Fixed
+- Improved active-window identification using process and bundle information.
+- Removed noisy invalid linker search paths from the build path.
+
+## [0.4.1]
 
 ### Added
+- Option to exclude the currently active window from the switcher.
 
-- Added a setting to enable or disable mouse hover selection and click-to-activate.
-- Preserved keyboard navigation when mouse control is disabled.
-
-## [0.3.7] - 2026-11-07
-
-### Fixed
-
-- Replaced a conditional `AXUIElement` downcast with an explicit Core Foundation type-ID check.
-
-## [0.3.6] - 2026-11-07
-
-### Fixed
-
-- Reworked the settings page layout to avoid compressed controls.
-- Stabilized window ordering and reduced duplicate Core Graphics / Accessibility entries.
-
-## [0.3.5] - 2026-11-07
-
-### Fixed
-
-- Replaced unavailable `NSImage.withTintColor` usage in app icon generation.
-
-### Documentation
-
-- Added GitHub-compatible README and changelog files.
-
-## [0.3.4] - 2026-11-07
+## [0.4.0]
 
 ### Added
+- Session-level MRU ordering based on observed focus changes.
+- Per-window focus tracking within the same application.
 
-- Added an app icon based on the menu bar symbol.
-
-## [0.3.3] - 2026-11-07
-
-### Fixed
-
-- Increased and made the settings window resizable.
-
-## [0.3.2] - 2026-11-07
-
-### Fixed
-
-- Improved Core Graphics / Accessibility window deduplication and stable ordering.
-
-## [0.3.1] - 2026-11-07
-
-### Fixed
-
-- Replaced the SwiftUI settings view with AppKit controls.
-- Corrected the `acceptsFirstMouse(for:)` override signature.
-
-## [0.3.0] - 2026-11-07
+## [0.3.9]
 
 ### Added
+- Window discovery polling and insertion-time tracking as a basis for ordering.
+- Updated GitHub mockups and README.
 
-- Initial implementation of the native macOS window switcher, window filters, appearance settings, thumbnails, and keyboard/mouse navigation.
+## [0.3.8]
+
+### Added
+- Setting to disable mouse hover and click interaction while retaining keyboard navigation.
+
+## [0.3.7]
+
+### Fixed
+- Corrected Core Foundation type handling for Accessibility window elements.
+
+## [0.3.6]
+
+### Fixed
+- Stabilized switcher ordering and improved matching between Core Graphics and Accessibility window records.
+- Reworked the settings layout.
+
+## [0.3.5]
+
+### Fixed
+- Replaced an unavailable `NSImage.withTintColor` call in the app icon generator with compatible bitmap rendering.
+- Added GitHub-ready English documentation.
+
+## [0.3.4]
+
+### Added
+- Generated an app icon matching the menu bar symbol.
+
+## [0.3.3]
+
+### Fixed
+- Increased settings window size and improved layout constraints.
+
+## [0.3.2]
+
+### Fixed
+- Stabilized window ordering and reduced duplicate window entries.
+
+## [0.3.1]
+
+### Fixed
+- Replaced SwiftUI settings with AppKit controls for better compatibility with Command Line Tools builds.
+- Corrected the `acceptsFirstMouse` override signature.
+
+## [0.3.0]
+
+### Added
+- First extended version with settings, window filtering, multiple visual styles, and mouse navigation.
